@@ -20,6 +20,8 @@ import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
 
+from filters import build_mask, render_filter_controls
+
 # ---------------------------
 # Helpers
 # ---------------------------
@@ -306,6 +308,21 @@ for i in range(int(num_sessions)):
         if df is None or df.empty:
             st.warning("Empty dataset.")
             continue
+
+        st.markdown("**Filters**")
+        conditions = render_filter_controls(df, key_prefix=f"flt_{i}", allow_time_index=True)
+        mask = build_mask(df, conditions)
+        filtered_df = df.loc[mask].copy()
+        removed_rows = len(df) - len(filtered_df)
+        st.caption(
+            f"Filters applied. Rows kept: **{len(filtered_df):,}** (removed {max(removed_rows, 0):,})."
+        )
+
+        if filtered_df.empty:
+            st.warning("No rows match the selected filters.")
+            continue
+
+        df = filtered_df
 
         num_cols = numeric_columns(df)
         if not num_cols:
