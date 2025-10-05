@@ -241,6 +241,21 @@ def compute_histogram_table(
     return table
 
 
+def _survival_arrays(probability: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Return survival evaluated at the left and right edge of each bin."""
+
+    if probability.size == 0:
+        empty = np.array([], dtype=float)
+        return empty, empty
+
+    survival_left = np.cumsum(probability[::-1])[::-1]
+    # After leaving the bin (i.e. at the right edge) the survival drops by that bin's mass
+    survival_right = survival_left - probability
+    # Numerical noise can push slightly below zero
+    survival_right = np.clip(survival_right, 0.0, 1.0)
+    return survival_left, survival_right
+
+
 def _interval_overlap(mask_series: pd.Series, left: float, right: float) -> pd.Series:
     """Return boolean mask for bins overlapping [left, right]."""
     return (mask_series["bin_right"] > left) & (mask_series["bin_left"] < right)
@@ -432,19 +447,26 @@ for i in range(int(num_sessions)):
                             st.write(f"Δ probability = |p(x1)−p(x0)| = **{abs(p1 - p0):.4f}**")
                         else:  # Inverse cumulative
                             probability = export_table["probability"].to_numpy()
-                            survival = np.cumsum(probability[::-1])[::-1]
+                            survival_left, survival_right = _survival_arrays(probability)
                             bin_left = export_table["bin_left"].to_numpy()
                             bin_right = export_table["bin_right"].to_numpy()
 
                             def survival_at(x: float) -> float:
-                                if x < bin_left[0]:
-                                    return 1.0
+                                if survival_left.size == 0:
+                                    return 0.0
+                                if x <= bin_left[0]:
+                                    return float(survival_left[0])
                                 if x >= bin_right[-1]:
                                     return 0.0
                                 idx = int(np.searchsorted(bin_right, x, side="right"))
-                                if idx >= survival.size:
-                                    return 0.0
-                                return float(survival[idx])
+                                idx = max(0, min(idx, survival_left.size - 1))
+                                width = bin_right[idx] - bin_left[idx]
+                                if width <= 0 or probability[idx] <= 0:
+                                    return float(survival_right[idx])
+                                frac = (x - bin_left[idx]) / width
+                                frac = float(np.clip(frac, 0.0, 1.0))
+                                drop = probability[idx] * frac
+                                return float(np.clip(survival_left[idx] - drop, 0.0, 1.0))
 
                             p0 = survival_at(float(x0))
                             p1 = survival_at(float(x1))
@@ -518,19 +540,28 @@ for i in range(int(num_sessions)):
                         pass
                 if not export_table.empty:
                     probability = export_table["probability"].to_numpy()
-                    survival = np.cumsum(probability[::-1])[::-1]
-                    idx_candidates = np.where(survival <= y_limit)[0]
-                    idx = int(idx_candidates[0]) if idx_candidates.size > 0 else None
+                    survival_left, survival_right = _survival_arrays(probability)
+                    bin_left = export_table["bin_left"].to_numpy()
+                    bin_right = export_table["bin_right"].to_numpy()
+                    transitions = np.where((survival_left >= y_limit) & (survival_right <= y_limit))[0]
+                    idx = int(transitions[0]) if transitions.size > 0 else None
                     if show_intercepts and idx is not None:
-                        x_quant = float(export_table.iloc[idx]["bin_left"])  # align with survival step
+                        width = float(bin_right[idx] - bin_left[idx])
+                        frac = 0.0
+                        if probability[idx] > 0 and width > 0:
+                            frac = (survival_left[idx] - y_limit) / probability[idx]
+                            frac = float(np.clip(frac, 0.0, 1.0))
+                        x_quant = float(bin_left[idx] + frac * width)
                         try:
                             fig.add_vline(x=x_quant, line_color="purple", line_width=3)
                         except Exception:
                             pass
+                        above_mass = float(np.clip(y_limit, 0.0, 1.0))
+                        below_mass = float(np.clip(1.0 - above_mass, 0.0, 1.0))
                         st.write(
                             (
-                                f"Approx. survival intercept at limit: x ≈ **{x_quant:.6g}** · above mass ≈ **{float(survival[idx]):.4f}**, "
-                                f"below mass ≈ **{float(1 - survival[idx]):.4f}**"
+                                f"Approx. survival intercept at limit: x ≈ **{x_quant:.6g}** · "
+                                f"above mass ≈ **{above_mass:.4f}**, below mass ≈ **{below_mass:.4f}**"
                             )
                         )
                     elif show_intercepts:
