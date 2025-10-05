@@ -396,41 +396,61 @@ for i in range(int(num_sessions)):
             end_override=end_override,
         )
 
-        # --- X‑interval metrics ---        with st.expander("X-interval metrics"):
-        dmin = float(export_table["bin_left"].min()) if not export_table.empty else 0.0
-        dmax = float(export_table["bin_right"].max()) if not export_table.empty else 1.0
-        xi1, xi2 = st.columns(2)
-        x0 = xi1.number_input("Start (x0)", value=dmin, key=f"x0_{i}")
-        x1 = xi2.number_input("End (x1)", value=dmax, key=f"x1_{i}")
-        show_x_guides = st.checkbox("Show x-lines (guides)", value=False, key=f"show_x_guides_{i}")
-        if x0 >= x1:
-            st.warning("x0 must be < x1")
-        else:
-            # Optional vertical guide lines at x0/x1 (red, thicker)
-            if show_x_guides:
-                try:
-                    fig.add_vline(x=x0, line_color="red", line_width=3)
-                    fig.add_vline(x=x1, line_color="red", line_width=3)
-                except Exception:
-                    pass
-            if not export_table.empty:
-                mask = (export_table["bin_right"] > x0) & (export_table["bin_left"] < x1)
-                sel = export_table[mask]
-                if not sel.empty:
-                    if hist_type == "Standard":
-                        if hist_output == "Count":
-                            val = float(sel["count"].sum())
-                            st.write(f"Sum of count in [x0,x1] = **{val:.0f}**")
-                        else:
-                            val = float(sel["probability"].sum())
-                            st.write(f"Sum of probability in [x0,x1] = **{val:.4f}**")
-                    else:  # cumulative metrics
-                        cumprob = export_table["probability"].to_numpy().cumsum()
-                        p0 = float(cumprob[(export_table["bin_right"] <= x0)].max()) if (export_table["bin_right"] <= x0).any() else 0.0
-                        p1 = float(cumprob[(export_table["bin_right"] <= x1)].max()) if (export_table["bin_right"] <= x1).any() else 0.0
-                        st.write(f"Δ probability = |p(x1)−p(x0)| = **{abs(p1 - p0):.4f}**")
-                else:
-                    st.info("No bins intersect this interval.")
+        # --- X‑interval metrics ---
+        with st.expander("X-interval metrics"):
+            dmin = float(export_table["bin_left"].min()) if not export_table.empty else 0.0
+            dmax = float(export_table["bin_right"].max()) if not export_table.empty else 1.0
+            xi1, xi2 = st.columns(2)
+            x0 = xi1.number_input("Start (x0)", value=dmin, key=f"x0_{i}")
+            x1 = xi2.number_input("End (x1)", value=dmax, key=f"x1_{i}")
+            show_x_guides = st.checkbox("Show x-lines (guides)", value=False, key=f"show_x_guides_{i}")
+            if x0 >= x1:
+                st.warning("x0 must be < x1")
+            else:
+                # Optional vertical guide lines at x0/x1 (red, thicker)
+                if show_x_guides:
+                    try:
+                        fig.add_vline(x=x0, line_color="red", line_width=3)
+                        fig.add_vline(x=x1, line_color="red", line_width=3)
+                    except Exception:
+                        pass
+                if not export_table.empty:
+                    mask = (export_table["bin_right"] > x0) & (export_table["bin_left"] < x1)
+                    sel = export_table[mask]
+                    if not sel.empty:
+                        if hist_type == "Standard":
+                            if hist_output == "Count":
+                                val = float(sel["count"].sum())
+                                st.write(f"Sum of count in [x0,x1] = **{val:.0f}**")
+                            else:
+                                val = float(sel["probability"].sum())
+                                st.write(f"Sum of probability in [x0,x1] = **{val:.4f}**")
+                        elif hist_type == "Cumulative":
+                            cumprob = export_table["probability"].to_numpy().cumsum()
+                            p0 = float(cumprob[(export_table["bin_right"] <= x0)].max()) if (export_table["bin_right"] <= x0).any() else 0.0
+                            p1 = float(cumprob[(export_table["bin_right"] <= x1)].max()) if (export_table["bin_right"] <= x1).any() else 0.0
+                            st.write(f"Δ probability = |p(x1)−p(x0)| = **{abs(p1 - p0):.4f}**")
+                        else:  # Inverse cumulative
+                            probability = export_table["probability"].to_numpy()
+                            survival = np.cumsum(probability[::-1])[::-1]
+                            bin_left = export_table["bin_left"].to_numpy()
+                            bin_right = export_table["bin_right"].to_numpy()
+
+                            def survival_at(x: float) -> float:
+                                if x < bin_left[0]:
+                                    return 1.0
+                                if x >= bin_right[-1]:
+                                    return 0.0
+                                idx = int(np.searchsorted(bin_right, x, side="right"))
+                                if idx >= survival.size:
+                                    return 0.0
+                                return float(survival[idx])
+
+                            p0 = survival_at(float(x0))
+                            p1 = survival_at(float(x1))
+                            st.write(f"Δ probability = |p(x1)−p(x0)| = **{abs(p1 - p0):.4f}**")
+                    else:
+                        st.info("No bins intersect this interval.")
 
         # --- Y-limit / intercept ---
         with st.expander("Y-limit / intercept"):
@@ -460,7 +480,7 @@ for i in range(int(num_sessions)):
                         st.write("Intercept bin centers:", ", ".join(f"{centers[idx]:.6g}" for idx in crosses))
                     elif show_intercepts:
                         st.info("No intercept with the chosen Y limit.")
-            else:
+            elif hist_type == "Cumulative":
                 # Cumulative: probability limit
                 y_limit = st.number_input("Probability limit (0–1)", value=0.5, min_value=0.0, max_value=1.0, key=f"ylcum_{i}")
                 show_intercepts = st.checkbox("Show intercept guides & values", value=False, key=f"show_intercepts_cum_{i}")
@@ -480,6 +500,38 @@ for i in range(int(num_sessions)):
                             pass
                         st.write(
                             f"Approx. quantile at limit: x ≈ **{x_quant:.6g}** · below mass ≈ **{float(cumprob[idx]):.4f}**, above mass ≈ **{float(1 - cumprob[idx]):.4f}**"
+                        )
+                    elif show_intercepts:
+                        st.info("Limit not reached within data range.")
+            else:
+                # Inverse cumulative: survival limit
+                y_limit = st.number_input(
+                    "Survival limit (0–1)", value=0.5, min_value=0.0, max_value=1.0, key=f"ylinv_{i}"
+                )
+                show_intercepts = st.checkbox(
+                    "Show intercept guides & values", value=False, key=f"show_intercepts_inv_{i}"
+                )
+                if show_intercepts:
+                    try:
+                        fig.add_hline(y=y_limit, line_color="purple", line_width=3)
+                    except Exception:
+                        pass
+                if not export_table.empty:
+                    probability = export_table["probability"].to_numpy()
+                    survival = np.cumsum(probability[::-1])[::-1]
+                    idx_candidates = np.where(survival <= y_limit)[0]
+                    idx = int(idx_candidates[0]) if idx_candidates.size > 0 else None
+                    if show_intercepts and idx is not None:
+                        x_quant = float(export_table.iloc[idx]["bin_left"])  # align with survival step
+                        try:
+                            fig.add_vline(x=x_quant, line_color="purple", line_width=3)
+                        except Exception:
+                            pass
+                        st.write(
+                            (
+                                f"Approx. survival intercept at limit: x ≈ **{x_quant:.6g}** · above mass ≈ **{float(survival[idx]):.4f}**, "
+                                f"below mass ≈ **{float(1 - survival[idx]):.4f}**"
+                            )
                         )
                     elif show_intercepts:
                         st.info("Limit not reached within data range.")
