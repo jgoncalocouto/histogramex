@@ -116,7 +116,11 @@ def build_histogram(
     if hist_type == "Cumulative":
         base.update_traces(cumulative_enabled=True, cumulative_direction="increasing")
     elif hist_type == "Inverse cumulative":
-        base.update_traces(cumulative_enabled=True, cumulative_direction="decreasing")
+        base.update_traces(
+            cumulative_enabled=True,
+            cumulative_direction="decreasing",
+            cumulative_currentbin="exclude",
+        )
 
     if xrange is not None:
         base.update_xaxes(range=list(xrange))
@@ -254,6 +258,33 @@ def _survival_arrays(probability: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
     # Numerical noise can push slightly below zero
     survival_right = np.clip(survival_right, 0.0, 1.0)
     return survival_left, survival_right
+
+
+def _survival_at(
+    x: float,
+    bin_left: np.ndarray,
+    bin_right: np.ndarray,
+    probability: np.ndarray,
+    survival_left: np.ndarray,
+    survival_right: np.ndarray,
+) -> float:
+    """Return survival value interpolated inside a histogram bin."""
+
+    if survival_left.size == 0:
+        return 0.0
+    if x <= bin_left[0]:
+        return float(survival_left[0])
+    if x >= bin_right[-1]:
+        return 0.0
+    idx = int(np.searchsorted(bin_right, x, side="right"))
+    idx = max(0, min(idx, survival_left.size - 1))
+    width = bin_right[idx] - bin_left[idx]
+    if width <= 0 or probability[idx] <= 0:
+        return float(survival_right[idx])
+    frac = (x - bin_left[idx]) / width
+    frac = float(np.clip(frac, 0.0, 1.0))
+    drop = probability[idx] * frac
+    return float(np.clip(survival_left[idx] - drop, 0.0, 1.0))
 
 
 def _interval_overlap(mask_series: pd.Series, left: float, right: float) -> pd.Series:
@@ -451,25 +482,12 @@ for i in range(int(num_sessions)):
                             bin_left = export_table["bin_left"].to_numpy()
                             bin_right = export_table["bin_right"].to_numpy()
 
-                            def survival_at(x: float) -> float:
-                                if survival_left.size == 0:
-                                    return 0.0
-                                if x <= bin_left[0]:
-                                    return float(survival_left[0])
-                                if x >= bin_right[-1]:
-                                    return 0.0
-                                idx = int(np.searchsorted(bin_right, x, side="right"))
-                                idx = max(0, min(idx, survival_left.size - 1))
-                                width = bin_right[idx] - bin_left[idx]
-                                if width <= 0 or probability[idx] <= 0:
-                                    return float(survival_right[idx])
-                                frac = (x - bin_left[idx]) / width
-                                frac = float(np.clip(frac, 0.0, 1.0))
-                                drop = probability[idx] * frac
-                                return float(np.clip(survival_left[idx] - drop, 0.0, 1.0))
-
-                            p0 = survival_at(float(x0))
-                            p1 = survival_at(float(x1))
+                            p0 = _survival_at(
+                                float(x0), bin_left, bin_right, probability, survival_left, survival_right
+                            )
+                            p1 = _survival_at(
+                                float(x1), bin_left, bin_right, probability, survival_left, survival_right
+                            )
                             st.write(f"Δ probability = |p(x1)−p(x0)| = **{abs(p1 - p0):.4f}**")
                     else:
                         st.info("No bins intersect this interval.")
@@ -556,7 +574,10 @@ for i in range(int(num_sessions)):
                             fig.add_vline(x=x_quant, line_color="purple", line_width=3)
                         except Exception:
                             pass
-                        above_mass = float(np.clip(y_limit, 0.0, 1.0))
+                        survival_value = _survival_at(
+                            x_quant, bin_left, bin_right, probability, survival_left, survival_right
+                        )
+                        above_mass = float(np.clip(survival_value, 0.0, 1.0))
                         below_mass = float(np.clip(1.0 - above_mass, 0.0, 1.0))
                         st.write(
                             (
