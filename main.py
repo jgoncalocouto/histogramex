@@ -298,340 +298,321 @@ def _interval_overlap(mask_series: pd.Series, left: float, right: float) -> pd.S
 # App UI
 # ---------------------------
 
-st.set_page_config(page_title="Histogram Explorer — Multiple", layout="wide")
-st.title("Histogram Explorer — Multiple")
+st.set_page_config(page_title="Histogram Explorer", layout="wide")
+st.title("Histogram Explorer")
 
-st.sidebar.markdown("### Global Settings")
-num_sessions = st.sidebar.number_input(
-    "Number of histograms", min_value=1, max_value=12, value=2, step=1, key="num_sessions"
+st.session_state.setdefault("label", "Histogram")
+
+# Top row: label + toggles
+ctop1, ctop2 = st.columns([1.6, 1])
+with ctop1:
+    label = st.text_input("Label", value=st.session_state["label"], key="label_input")
+    st.session_state["label"] = label
+with ctop2:
+    show_table = st.checkbox("Show data table", value=False, key="show_table")
+    show_stats = st.checkbox("Show quick stats", value=True, key="show_stats")
+
+# File upload
+uploaded = st.file_uploader(
+    "Upload CSV, Excel, or JSON",
+    type=["csv", "xls", "xlsx", "json", "ndjson"],
+    help="CSV delimiter is auto‑detected (semicolon/comma).",
 )
-show_global_help = st.sidebar.checkbox("Show quick how‑to", value=True)
 
-if show_global_help:
-    st.sidebar.info(
-        "Each histogram has its own expander below. Upload a file, choose the column and options."
-        "Use the 'X‑interval metrics' and 'Y‑limit / intercept' sections for calculations."
-    )
+# Load data or build a demo
+if uploaded is not None:
+    df = load_table(uploaded)
+    dataset_name = uploaded.name
+else:
+    st.info("No file uploaded. Using a small demo dataset.")
+    rng = np.random.default_rng(100)
+    df = pd.DataFrame({
+        "normal": rng.normal(loc=50, scale=10, size=2000),
+        "uniform": rng.uniform(low=10, high=90, size=2000),
+    })
+    dataset_name = "demo"
 
-# Seed per‑session label defaults
-for i in range(int(num_sessions)):
-    st.session_state.setdefault(f"label_{i}", f"Histogram {i+1}")
+if df is None or df.empty:
+    st.warning("Empty dataset.")
+    st.stop()
 
-# Render sessions
-for i in range(int(num_sessions)):
-    session_default_label = st.session_state.get(f"label_{i}", f"Histogram {i+1}")
-    with st.expander(f"Session {i+1}: {session_default_label}", expanded=(i == 0)):
-        # Top row: label + toggles
-        ctop1, ctop2 = st.columns([1.6, 1])
-        with ctop1:
-            label = st.text_input("Label", value=session_default_label, key=f"label_input_{i}")
-            st.session_state[f"label_{i}"] = label
-        with ctop2:
-            show_table = st.checkbox("Show data table", value=False, key=f"table_{i}")
-            show_stats = st.checkbox("Show quick stats", value=True, key=f"stats_{i}")
+st.markdown("**Filters**")
+conditions = render_filter_controls(df, key_prefix="flt", allow_time_index=True)
+mask = build_mask(df, conditions)
+filtered_df = df.loc[mask].copy()
+removed_rows = len(df) - len(filtered_df)
+st.caption(
+    f"Filters applied. Rows kept: **{len(filtered_df):,}** (removed {max(removed_rows, 0):,})."
+)
 
-        # File upload inside the session
-        uploaded = st.file_uploader(
-            "Upload CSV, Excel, or JSON",
-            type=["csv", "xls", "xlsx", "json", "ndjson"],
-            key=f"uploader_{i}",
-            help="CSV delimiter is auto‑detected (semicolon/comma).",
-        )
+if filtered_df.empty:
+    st.warning("No rows match the selected filters.")
+    st.stop()
 
-        # Load data or build a per‑session demo
-        if uploaded is not None:
-            df = load_table(uploaded)
-            dataset_name = uploaded.name
+df = filtered_df
+
+num_cols = numeric_columns(df)
+if not num_cols:
+    st.error("No numeric columns found in this dataset.")
+    st.stop()
+
+# Controls row
+st.markdown("**Controls**")
+col1, col2, col3, col4 = st.columns([1.6, 1.4, 1.2, 1.2])
+with col1:
+    chosen = st.selectbox("Numeric column", options=num_cols, index=0, key="col")
+with col2:
+    bin_mode = st.selectbox("Binning mode", ["Auto", "Bin width", "Number of bins"], index=0, key="binmode")
+with col3:
+    hist_output = st.selectbox("Output", ["Count", "Normalized (0–1)"], index=0, key="out")
+with col4:
+    hist_type = st.selectbox("Type", ["Standard", "Cumulative", "Inverse cumulative"], index=0, key="type")
+
+# Dynamic bin inputs
+bin_width = None
+n_bins = None
+if bin_mode == "Bin width":
+    bin_width = st.number_input("Bin width", min_value=1e-12, value=1.0, step=1.0, format="%f", key="binw")
+elif bin_mode == "Number of bins":
+    n_bins = st.number_input("Number of bins", min_value=1, value=30, step=1, key="nbins")
+
+# Optional X range
+with st.expander("Optional: Limit X range"):
+    default_min, default_max = compute_default_range(df[chosen])
+    use_range = st.checkbox("Enable X range filter", value=False, key="use_range")
+    xrange = None
+    if use_range:
+        sub1, sub2 = st.columns(2)
+        xmin = sub1.number_input("X min", value=default_min, key="xmin")
+        xmax = sub2.number_input("X max", value=default_max, key="xmax")
+        if xmin < xmax:
+            xrange = (xmin, xmax)
         else:
-            st.info("No file uploaded for this session. Using a small demo dataset.")
-            rng = np.random.default_rng(100 + i)
-            df = pd.DataFrame({
-                "normal": rng.normal(loc=50, scale=10, size=2000),
-                "uniform": rng.uniform(low=10, high=90, size=2000),
-            })
-            dataset_name = "demo"
+            st.warning("X min must be less than X max.")
 
-        if df is None or df.empty:
-            st.warning("Empty dataset.")
-            continue
-
-        st.markdown("**Filters**")
-        conditions = render_filter_controls(df, key_prefix=f"flt_{i}", allow_time_index=True)
-        mask = build_mask(df, conditions)
-        filtered_df = df.loc[mask].copy()
-        removed_rows = len(df) - len(filtered_df)
-        st.caption(
-            f"Filters applied. Rows kept: **{len(filtered_df):,}** (removed {max(removed_rows, 0):,})."
-        )
-
-        if filtered_df.empty:
-            st.warning("No rows match the selected filters.")
-            continue
-
-        df = filtered_df
-
-        num_cols = numeric_columns(df)
-        if not num_cols:
-            st.error("No numeric columns found in this dataset.")
-            continue
-
-        # Controls row
-        st.markdown("**Controls**")
-        col1, col2, col3, col4 = st.columns([1.6, 1.4, 1.2, 1.2])
-        with col1:
-            chosen = st.selectbox("Numeric column", options=num_cols, index=0, key=f"col_{i}")
-        with col2:
-            bin_mode = st.selectbox("Binning mode", ["Auto", "Bin width", "Number of bins"], index=0, key=f"binmode_{i}")
-        with col3:
-            hist_output = st.selectbox("Output", ["Count", "Normalized (0–1)"], index=0, key=f"out_{i}")
-        with col4:
-            hist_type = st.selectbox("Type", ["Standard", "Cumulative", "Inverse cumulative"], index=0, key=f"type_{i}")
-
-        # Dynamic bin inputs
-        bin_width = None
-        n_bins = None
-        if bin_mode == "Bin width":
-            bin_width = st.number_input("Bin width", min_value=1e-12, value=1.0, step=1.0, format="%f", key=f"binw_{i}")
-        elif bin_mode == "Number of bins":
-            n_bins = st.number_input("Number of bins", min_value=1, value=30, step=1, key=f"nbins_{i}")
-
-        # Optional X range
-        with st.expander("Optional: Limit X range"):
-            default_min, default_max = compute_default_range(df[chosen])
-            use_range = st.checkbox("Enable X range filter", value=False, key=f"use_range_{i}")
-            xrange = None
-            if use_range:
-                sub1, sub2 = st.columns(2)
-                xmin = sub1.number_input("X min", value=default_min, key=f"xmin_{i}")
-                xmax = sub2.number_input("X max", value=default_max, key=f"xmax_{i}")
-                if xmin < xmax:
-                    xrange = (xmin, xmax)
-                else:
-                    st.warning("X min must be less than X max.")
-
-        # Force start/end
-        with st.expander("Optional: Force bin start/end (applies to all modes)"):
-            force_edges = st.checkbox("Enable bin edge overrides", value=False, key=f"force_edges_{i}")
-            start_override = None
-            end_override = None
-            if force_edges:
-                sm1, sm2 = st.columns(2)
-                dmin, dmax = compute_default_range(df[chosen])
-                if xrange is not None:
-                    dmin = max(dmin, xrange[0])
-                    dmax = min(dmax, xrange[1])
-                start_val = sm1.number_input("Force START", value=float(dmin), key=f"start_{i}")
-                end_val = sm2.number_input("Force END", value=float(dmax), key=f"end_{i}")
-                if start_val >= end_val:
-                    st.warning("START must be strictly less than END. Overrides will be ignored.")
-                else:
-                    start_override = float(start_val)
-                    end_override = float(end_val)
+# Force start/end
+with st.expander("Optional: Force bin start/end (applies to all modes)"):
+    force_edges = st.checkbox("Enable bin edge overrides", value=False, key="force_edges")
+    start_override = None
+    end_override = None
+    if force_edges:
+        sm1, sm2 = st.columns(2)
+        dmin, dmax = compute_default_range(df[chosen])
+        if xrange is not None:
+            dmin = max(dmin, xrange[0])
+            dmax = min(dmax, xrange[1])
+        start_val = sm1.number_input("Force START", value=float(dmin), key="start")
+        end_val = sm2.number_input("Force END", value=float(dmax), key="end")
+        if start_val >= end_val:
+            st.warning("START must be strictly less than END. Overrides will be ignored.")
+        else:
+            start_override = float(start_val)
+            end_override = float(end_val)
 
         # Chart
-        st.subheader("Chart")
-        fig = build_histogram(
-            df=df,
-            col=chosen,
-            bin_mode=bin_mode,
-            bin_width=bin_width,
-            n_bins=n_bins,
-            hist_output=hist_output,
-            hist_type=hist_type,
-            xrange=xrange,
-            start_override=start_override,
-            end_override=end_override,
-        )
+st.subheader("Chart")
+fig = build_histogram(
+    df=df,
+    col=chosen,
+    bin_mode=bin_mode,
+    bin_width=bin_width,
+    n_bins=n_bins,
+    hist_output=hist_output,
+    hist_type=hist_type,
+    xrange=xrange,
+    start_override=start_override,
+    end_override=end_override,
+)
 
-        # Export bins (CSV) & analytics base table
-        export_table = compute_histogram_table(
-            df=df,
-            col=chosen,
-            label=label,
-            dataset_name=dataset_name,
-            bin_mode=bin_mode,
-            bin_width=bin_width,
-            n_bins=n_bins,
-            hist_output=hist_output,
-            hist_type=hist_type,
-            xrange=xrange,
-            start_override=start_override,
-            end_override=end_override,
-        )
+# Export bins (CSV) & analytics base table
+export_table = compute_histogram_table(
+    df=df,
+    col=chosen,
+    label=label,
+    dataset_name=dataset_name,
+    bin_mode=bin_mode,
+    bin_width=bin_width,
+    n_bins=n_bins,
+    hist_output=hist_output,
+    hist_type=hist_type,
+    xrange=xrange,
+    start_override=start_override,
+    end_override=end_override,
+)
 
-        # --- X‑interval metrics ---
-        with st.expander("X-interval metrics"):
-            dmin = float(export_table["bin_left"].min()) if not export_table.empty else 0.0
-            dmax = float(export_table["bin_right"].max()) if not export_table.empty else 1.0
-            xi1, xi2 = st.columns(2)
-            x0 = xi1.number_input("Start (x0)", value=dmin, key=f"x0_{i}")
-            x1 = xi2.number_input("End (x1)", value=dmax, key=f"x1_{i}")
-            show_x_guides = st.checkbox("Show x-lines (guides)", value=False, key=f"show_x_guides_{i}")
-            if x0 >= x1:
-                st.warning("x0 must be < x1")
-            else:
-                # Optional vertical guide lines at x0/x1 (red, thicker)
-                if show_x_guides:
-                    try:
-                        fig.add_vline(x=x0, line_color="red", line_width=3)
-                        fig.add_vline(x=x1, line_color="red", line_width=3)
-                    except Exception:
-                        pass
-                if not export_table.empty:
-                    mask = (export_table["bin_right"] > x0) & (export_table["bin_left"] < x1)
-                    sel = export_table[mask]
-                    if not sel.empty:
-                        if hist_type == "Standard":
-                            if hist_output == "Count":
-                                val = float(sel["count"].sum())
-                                st.write(f"Sum of count in [x0,x1] = **{val:.0f}**")
-                            else:
-                                val = float(sel["probability"].sum())
-                                st.write(f"Sum of probability in [x0,x1] = **{val:.4f}**")
-                        elif hist_type == "Cumulative":
-                            cumprob = export_table["probability"].to_numpy().cumsum()
-                            p0 = float(cumprob[(export_table["bin_right"] <= x0)].max()) if (export_table["bin_right"] <= x0).any() else 0.0
-                            p1 = float(cumprob[(export_table["bin_right"] <= x1)].max()) if (export_table["bin_right"] <= x1).any() else 0.0
-                            st.write(f"Δ probability = |p(x1)−p(x0)| = **{abs(p1 - p0):.4f}**")
-                        else:  # Inverse cumulative
-                            probability = export_table["probability"].to_numpy()
-                            survival_left, survival_right = _survival_arrays(probability)
-                            bin_left = export_table["bin_left"].to_numpy()
-                            bin_right = export_table["bin_right"].to_numpy()
-
-                            p0 = _survival_at(
-                                float(x0), bin_left, bin_right, probability, survival_left, survival_right
-                            )
-                            p1 = _survival_at(
-                                float(x1), bin_left, bin_right, probability, survival_left, survival_right
-                            )
-                            st.write(f"Δ probability = |p(x1)−p(x0)| = **{abs(p1 - p0):.4f}**")
+# --- X‑interval metrics ---
+with st.expander("X-interval metrics"):
+    dmin = float(export_table["bin_left"].min()) if not export_table.empty else 0.0
+    dmax = float(export_table["bin_right"].max()) if not export_table.empty else 1.0
+    xi1, xi2 = st.columns(2)
+    x0 = xi1.number_input("Start (x0)", value=dmin, key="x0")
+    x1 = xi2.number_input("End (x1)", value=dmax, key="x1")
+    show_x_guides = st.checkbox("Show x-lines (guides)", value=False, key="show_x_guides")
+    if x0 >= x1:
+        st.warning("x0 must be < x1")
+    else:
+        # Optional vertical guide lines at x0/x1 (red, thicker)
+        if show_x_guides:
+            try:
+                fig.add_vline(x=x0, line_color="red", line_width=3)
+                fig.add_vline(x=x1, line_color="red", line_width=3)
+            except Exception:
+                pass
+        if not export_table.empty:
+            mask = (export_table["bin_right"] > x0) & (export_table["bin_left"] < x1)
+            sel = export_table[mask]
+            if not sel.empty:
+                if hist_type == "Standard":
+                    if hist_output == "Count":
+                        val = float(sel["count"].sum())
+                        st.write(f"Sum of count in [x0,x1] = **{val:.0f}**")
                     else:
-                        st.info("No bins intersect this interval.")
-
-        # --- Y-limit / intercept ---
-        with st.expander("Y-limit / intercept"):
-            if hist_type == "Standard":
-                ymax = float(export_table["y"].max()) if not export_table.empty else 1.0
-                y_limit = st.number_input("Y limit", value=max(0.0, round(ymax * 0.2, 6)), min_value=0.0, key=f"yl_{i}")
-                show_intercepts = st.checkbox("Show intercept guides & values", value=False, key=f"show_intercepts_{i}")
-                if show_intercepts:
-                    try:
-                        fig.add_hline(y=y_limit, line_color="purple", line_width=3)
-                    except Exception:
-                        pass
-                if not export_table.empty:
-                    yvals = export_table["y"].to_numpy()
-                    centers = export_table["bin_center"].to_numpy()
-                    crosses = []
-                    if show_intercepts:
-                        for k in range(1, len(yvals)):
-                            if (yvals[k-1] < y_limit <= yvals[k]) or (yvals[k-1] > y_limit >= yvals[k]):
-                                crosses.append(k)
-                        for idx in crosses:
-                            try:
-                                fig.add_vline(x=float(centers[idx]), line_color="purple", line_width=3)
-                            except Exception:
-                                pass
-                    if show_intercepts and crosses:
-                        st.write("Intercept bin centers:", ", ".join(f"{centers[idx]:.6g}" for idx in crosses))
-                    elif show_intercepts:
-                        st.info("No intercept with the chosen Y limit.")
-            elif hist_type == "Cumulative":
-                # Cumulative: probability limit
-                y_limit = st.number_input("Probability limit (0–1)", value=0.5, min_value=0.0, max_value=1.0, key=f"ylcum_{i}")
-                show_intercepts = st.checkbox("Show intercept guides & values", value=False, key=f"show_intercepts_cum_{i}")
-                if show_intercepts:
-                    try:
-                        fig.add_hline(y=y_limit, line_color="purple", line_width=3)
-                    except Exception:
-                        pass
-                if not export_table.empty:
+                        val = float(sel["probability"].sum())
+                        st.write(f"Sum of probability in [x0,x1] = **{val:.4f}**")
+                elif hist_type == "Cumulative":
                     cumprob = export_table["probability"].to_numpy().cumsum()
-                    idx = int(np.argmax(cumprob >= y_limit)) if (cumprob >= y_limit).any() else None
-                    if show_intercepts and idx is not None:
-                        x_quant = float(export_table.iloc[idx]["bin_right"])  # approx
-                        try:
-                            fig.add_vline(x=x_quant, line_color="purple", line_width=3)
-                        except Exception:
-                            pass
-                        st.write(
-                            f"Approx. quantile at limit: x ≈ **{x_quant:.6g}** · below mass ≈ **{float(cumprob[idx]):.4f}**, above mass ≈ **{float(1 - cumprob[idx]):.4f}**"
-                        )
-                    elif show_intercepts:
-                        st.info("Limit not reached within data range.")
-            else:
-                # Inverse cumulative: survival limit
-                y_limit = st.number_input(
-                    "Survival limit (0–1)", value=0.5, min_value=0.0, max_value=1.0, key=f"ylinv_{i}"
-                )
-                show_intercepts = st.checkbox(
-                    "Show intercept guides & values", value=False, key=f"show_intercepts_inv_{i}"
-                )
-                if show_intercepts:
-                    try:
-                        fig.add_hline(y=y_limit, line_color="purple", line_width=3)
-                    except Exception:
-                        pass
-                if not export_table.empty:
+                    p0 = float(cumprob[(export_table["bin_right"] <= x0)].max()) if (export_table["bin_right"] <= x0).any() else 0.0
+                    p1 = float(cumprob[(export_table["bin_right"] <= x1)].max()) if (export_table["bin_right"] <= x1).any() else 0.0
+                    st.write(f"Δ probability = |p(x1)−p(x0)| = **{abs(p1 - p0):.4f}**")
+                else:  # Inverse cumulative
                     probability = export_table["probability"].to_numpy()
                     survival_left, survival_right = _survival_arrays(probability)
                     bin_left = export_table["bin_left"].to_numpy()
                     bin_right = export_table["bin_right"].to_numpy()
-                    transitions = np.where((survival_left >= y_limit) & (survival_right <= y_limit))[0]
-                    idx = int(transitions[0]) if transitions.size > 0 else None
-                    if show_intercepts and idx is not None:
-                        width = float(bin_right[idx] - bin_left[idx])
-                        frac = 0.0
-                        if probability[idx] > 0 and width > 0:
-                            frac = (survival_left[idx] - y_limit) / probability[idx]
-                            frac = float(np.clip(frac, 0.0, 1.0))
-                        x_quant = float(bin_left[idx] + frac * width)
-                        try:
-                            fig.add_vline(x=x_quant, line_color="purple", line_width=3)
-                        except Exception:
-                            pass
-                        survival_value = _survival_at(
-                            x_quant, bin_left, bin_right, probability, survival_left, survival_right
-                        )
-                        above_mass = float(np.clip(survival_value, 0.0, 1.0))
-                        below_mass = float(np.clip(1.0 - above_mass, 0.0, 1.0))
-                        st.write(
-                            (
-                                f"Approx. survival intercept at limit: x ≈ **{x_quant:.6g}** · "
-                                f"above mass ≈ **{above_mass:.4f}**, below mass ≈ **{below_mass:.4f}**"
-                            )
-                        )
-                    elif show_intercepts:
-                        st.info("Limit not reached within data range.")
 
-        # Render chart after adding optional guide lines
-        st.plotly_chart(fig, use_container_width=True)
+                    p0 = _survival_at(
+                        float(x0), bin_left, bin_right, probability, survival_left, survival_right
+                    )
+                    p1 = _survival_at(
+                        float(x1), bin_left, bin_right, probability, survival_left, survival_right
+                    )
+                    st.write(f"Δ probability = |p(x1)−p(x0)| = **{abs(p1 - p0):.4f}**")
+            else:
+                st.info("No bins intersect this interval.")
 
-        st.markdown(f"**Export:** {label} · {hist_type} · {hist_output} · {bin_mode}")
+# --- Y-limit / intercept ---
+with st.expander("Y-limit / intercept"):
+    if hist_type == "Standard":
+        ymax = float(export_table["y"].max()) if not export_table.empty else 1.0
+        y_limit = st.number_input("Y limit", value=max(0.0, round(ymax * 0.2, 6)), min_value=0.0, key="yl")
+        show_intercepts = st.checkbox("Show intercept guides & values", value=False, key="show_intercepts")
+        if show_intercepts:
+            try:
+                fig.add_hline(y=y_limit, line_color="purple", line_width=3)
+            except Exception:
+                pass
         if not export_table.empty:
-            safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_") or f"hist_{i+1}"
-            fname = f"hist_bins_session{i+1}_{safe_label}.csv"
-            st.download_button(
-                label="Download binned data (CSV)",
-                data=export_table.to_csv(index=False).encode("utf-8"),
-                file_name=fname,
-                mime="text/csv",
-                key=f"dl_{i}",
-            )
-        else:
-            st.info("No data to export with the current settings.")
+            yvals = export_table["y"].to_numpy()
+            centers = export_table["bin_center"].to_numpy()
+            crosses = []
+            if show_intercepts:
+                for k in range(1, len(yvals)):
+                    if (yvals[k-1] < y_limit <= yvals[k]) or (yvals[k-1] > y_limit >= yvals[k]):
+                        crosses.append(k)
+                for idx in crosses:
+                    try:
+                        fig.add_vline(x=float(centers[idx]), line_color="purple", line_width=3)
+                    except Exception:
+                        pass
+            if show_intercepts and crosses:
+                st.write("Intercept bin centers:", ", ".join(f"{centers[idx]:.6g}" for idx in crosses))
+            elif show_intercepts:
+                st.info("No intercept with the chosen Y limit.")
+    elif hist_type == "Cumulative":
+        # Cumulative: probability limit
+        y_limit = st.number_input("Probability limit (0–1)", value=0.5, min_value=0.0, max_value=1.0, key="ylcum")
+        show_intercepts = st.checkbox("Show intercept guides & values", value=False, key="show_intercepts_cum")
+        if show_intercepts:
+            try:
+                fig.add_hline(y=y_limit, line_color="purple", line_width=3)
+            except Exception:
+                pass
+        if not export_table.empty:
+            cumprob = export_table["probability"].to_numpy().cumsum()
+            idx = int(np.argmax(cumprob >= y_limit)) if (cumprob >= y_limit).any() else None
+            if show_intercepts and idx is not None:
+                x_quant = float(export_table.iloc[idx]["bin_right"])  # approx
+                try:
+                    fig.add_vline(x=x_quant, line_color="purple", line_width=3)
+                except Exception:
+                    pass
+                st.write(
+                    f"Approx. quantile at limit: x ≈ **{x_quant:.6g}** · below mass ≈ **{float(cumprob[idx]):.4f}**, above mass ≈ **{float(1 - cumprob[idx]):.4f}**"
+                )
+            elif show_intercepts:
+                st.info("Limit not reached within data range.")
+    else:
+        # Inverse cumulative: survival limit
+        y_limit = st.number_input(
+            "Survival limit (0–1)", value=0.5, min_value=0.0, max_value=1.0, key="ylinv"
+        )
+        show_intercepts = st.checkbox(
+            "Show intercept guides & values", value=False, key="show_intercepts_inv"
+        )
+        if show_intercepts:
+            try:
+                fig.add_hline(y=y_limit, line_color="purple", line_width=3)
+            except Exception:
+                pass
+        if not export_table.empty:
+            probability = export_table["probability"].to_numpy()
+            survival_left, survival_right = _survival_arrays(probability)
+            bin_left = export_table["bin_left"].to_numpy()
+            bin_right = export_table["bin_right"].to_numpy()
+            transitions = np.where((survival_left >= y_limit) & (survival_right <= y_limit))[0]
+            idx = int(transitions[0]) if transitions.size > 0 else None
+            if show_intercepts and idx is not None:
+                width = float(bin_right[idx] - bin_left[idx])
+                frac = 0.0
+                if probability[idx] > 0 and width > 0:
+                    frac = (survival_left[idx] - y_limit) / probability[idx]
+                    frac = float(np.clip(frac, 0.0, 1.0))
+                x_quant = float(bin_left[idx] + frac * width)
+                try:
+                    fig.add_vline(x=x_quant, line_color="purple", line_width=3)
+                except Exception:
+                    pass
+                survival_value = _survival_at(
+                    x_quant, bin_left, bin_right, probability, survival_left, survival_right
+                )
+                above_mass = float(np.clip(survival_value, 0.0, 1.0))
+                below_mass = float(np.clip(1.0 - above_mass, 0.0, 1.0))
+                st.write(
+                    (
+                        f"Approx. survival intercept at limit: x ≈ **{x_quant:.6g}** · "
+                        f"above mass ≈ **{above_mass:.4f}**, below mass ≈ **{below_mass:.4f}**"
+                    )
+                )
+            elif show_intercepts:
+                st.info("Limit not reached within data range.")
 
-        # Optional panels (inside the session expander)
-        if show_stats:
-            st.markdown("**Quick stats**")
-            descr = pd.Series(pd.to_numeric(df[chosen], errors="coerce"), name=chosen).describe(
-                percentiles=[0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]
-            )
-            st.write(descr.to_frame())
-        if show_table:
-            st.markdown("**Data preview**")
-            st.dataframe(df.head(100))
+# Render chart after adding optional guide lines
+st.plotly_chart(fig, use_container_width=True)
+
+st.markdown(f"**Export:** {label} · {hist_type} · {hist_output} · {bin_mode}")
+if not export_table.empty:
+    safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_") or "hist_1"
+    fname = f"hist_bins_{safe_label}.csv"
+    st.download_button(
+        label="Download binned data (CSV)",
+        data=export_table.to_csv(index=False).encode("utf-8"),
+        file_name=fname,
+        mime="text/csv",
+        key="dl",
+    )
+else:
+    st.info("No data to export with the current settings.")
+
+# Optional panels
+if show_stats:
+    st.markdown("**Quick stats**")
+    descr = pd.Series(pd.to_numeric(df[chosen], errors="coerce"), name=chosen).describe(
+        percentiles=[0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]
+    )
+    st.write(descr.to_frame())
+if show_table:
+    st.markdown("**Data preview**")
+    st.dataframe(df.head(100))
 
 st.caption(
     "Notes: In 'Bin width', bin size is exact. In 'Number of bins', size is fitted to START–END. In 'Auto', edges are auto‑chosen within forced limits."
