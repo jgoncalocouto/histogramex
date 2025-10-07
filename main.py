@@ -153,7 +153,6 @@ def _edges_from_binwidth(start: float, end: float, size: float) -> np.ndarray:
 def compute_histogram_table(
     df: pd.DataFrame,
     col: str,
-    label: str,
     dataset_name: str,
     bin_mode: str,
     bin_width: Optional[float],
@@ -220,7 +219,7 @@ def compute_histogram_table(
     centers = (edges[:-1] + edges[1:]) / 2.0
 
     meta = {
-        "session_label": label,
+        "session_label": "Histogram",
         "dataset": dataset_name,
         "column": col,
         "bin_mode": bin_mode,
@@ -298,119 +297,108 @@ def _interval_overlap(mask_series: pd.Series, left: float, right: float) -> pd.S
 # App UI
 # ---------------------------
 
-st.set_page_config(page_title="Histogram Explorer", layout="wide")
-st.title("Histogram Explorer")
+st.set_page_config(page_title="Histogramex", layout="wide")
+st.title("Histogramex")
 
-st.session_state.setdefault("label", "Histogram")
+with st.expander("Import",expanded=True):
+    # File upload
+    uploaded = st.file_uploader(
+        "Upload CSV, Excel, or JSON",
+        type=["csv", "xls", "xlsx", "json", "ndjson"],
+        help="CSV delimiter is auto‑detected (semicolon/comma).",
+    )
 
-# Top row: label + toggles
-ctop1, ctop2 = st.columns([1.6, 1])
-with ctop1:
-    label = st.text_input("Label", value=st.session_state["label"], key="label_input")
-    st.session_state["label"] = label
-with ctop2:
-    show_table = st.checkbox("Show data table", value=False, key="show_table")
-    show_stats = st.checkbox("Show quick stats", value=True, key="show_stats")
+    # Load data or build a demo
+    if uploaded is not None:
+        df = load_table(uploaded)
+        dataset_name = uploaded.name
+    else:
+        st.info("No file uploaded. Using a small demo dataset.")
+        rng = np.random.default_rng(100)
+        df = pd.DataFrame({
+            "normal": rng.normal(loc=50, scale=10, size=2000),
+            "uniform": rng.uniform(low=10, high=90, size=2000),
+        })
+        dataset_name = "demo"
 
-# File upload
-uploaded = st.file_uploader(
-    "Upload CSV, Excel, or JSON",
-    type=["csv", "xls", "xlsx", "json", "ndjson"],
-    help="CSV delimiter is auto‑detected (semicolon/comma).",
-)
+    if df is None or df.empty:
+        st.warning("Empty dataset.")
+        st.stop()
 
-# Load data or build a demo
-if uploaded is not None:
-    df = load_table(uploaded)
-    dataset_name = uploaded.name
-else:
-    st.info("No file uploaded. Using a small demo dataset.")
-    rng = np.random.default_rng(100)
-    df = pd.DataFrame({
-        "normal": rng.normal(loc=50, scale=10, size=2000),
-        "uniform": rng.uniform(low=10, high=90, size=2000),
-    })
-    dataset_name = "demo"
+    st.markdown("*Filters*")
+    conditions = render_filter_controls(df, key_prefix="flt", allow_time_index=True)
+    mask = build_mask(df, conditions)
+    filtered_df = df.loc[mask].copy()
+    removed_rows = len(df) - len(filtered_df)
+    st.caption(
+        f"Filters applied. Rows kept: **{len(filtered_df):,}** (removed {max(removed_rows, 0):,})."
+    )
+    
+    if filtered_df.empty:
+        st.warning("No rows match the selected filters.")
+        st.stop()
+    
+    df = filtered_df
+    
+    num_cols = numeric_columns(df)
+    if not num_cols:
+        st.error("No numeric columns found in this dataset.")
+        st.stop()
 
-if df is None or df.empty:
-    st.warning("Empty dataset.")
-    st.stop()
+with st.expander("Preview",expanded=False):
+    # Optional panels
+    st.markdown("**Quick stats**")
+    descr = df.describe(
+        percentiles=[0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]
+    )
+    st.dataframe(descr)
+    st.markdown("**Data preview**")
+    st.dataframe(df)
 
-st.markdown("**Filters**")
-conditions = render_filter_controls(df, key_prefix="flt", allow_time_index=True)
-mask = build_mask(df, conditions)
-filtered_df = df.loc[mask].copy()
-removed_rows = len(df) - len(filtered_df)
-st.caption(
-    f"Filters applied. Rows kept: **{len(filtered_df):,}** (removed {max(removed_rows, 0):,})."
-)
+with st.expander("Calculation",expanded=True):
+    # Controls row
+    col1, col2, col3, col4 = st.columns([1.6, 1.4, 1.2, 1.2])
+    with col1:
+        chosen = st.selectbox("Select column", options=num_cols, index=0, key="col")
+    with col2:
+        bin_mode = st.selectbox("Binning mode", ["Auto", "Bin width", "Number of bins"], index=0, key="binmode")
+    with col3:
+        hist_output = st.selectbox("Output", ["Count", "Normalized (0–1)"], index=0, key="out")
+    with col4:
+        hist_type = st.selectbox("Type", ["Standard", "Cumulative", "Inverse cumulative"], index=0, key="type")
 
-if filtered_df.empty:
-    st.warning("No rows match the selected filters.")
-    st.stop()
+    # Dynamic bin inputs
+    bin_width = None
+    n_bins = None
+    if bin_mode == "Bin width":
+        bin_width = st.number_input("Bin width", min_value=1e-12, value=1.0, step=1.0, format="%f", key="binw")
+    elif bin_mode == "Number of bins":
+        n_bins = st.number_input("Number of bins", min_value=1, value=30, step=1, key="nbins")
 
-df = filtered_df
 
-num_cols = numeric_columns(df)
-if not num_cols:
-    st.error("No numeric columns found in this dataset.")
-    st.stop()
-
-# Controls row
-st.markdown("**Controls**")
-col1, col2, col3, col4 = st.columns([1.6, 1.4, 1.2, 1.2])
-with col1:
-    chosen = st.selectbox("Numeric column", options=num_cols, index=0, key="col")
-with col2:
-    bin_mode = st.selectbox("Binning mode", ["Auto", "Bin width", "Number of bins"], index=0, key="binmode")
-with col3:
-    hist_output = st.selectbox("Output", ["Count", "Normalized (0–1)"], index=0, key="out")
-with col4:
-    hist_type = st.selectbox("Type", ["Standard", "Cumulative", "Inverse cumulative"], index=0, key="type")
-
-# Dynamic bin inputs
-bin_width = None
-n_bins = None
-if bin_mode == "Bin width":
-    bin_width = st.number_input("Bin width", min_value=1e-12, value=1.0, step=1.0, format="%f", key="binw")
-elif bin_mode == "Number of bins":
-    n_bins = st.number_input("Number of bins", min_value=1, value=30, step=1, key="nbins")
-
-# Optional X range
-with st.expander("Optional: Limit X range"):
-    default_min, default_max = compute_default_range(df[chosen])
-    use_range = st.checkbox("Enable X range filter", value=False, key="use_range")
-    xrange = None
-    if use_range:
-        sub1, sub2 = st.columns(2)
-        xmin = sub1.number_input("X min", value=default_min, key="xmin")
-        xmax = sub2.number_input("X max", value=default_max, key="xmax")
-        if xmin < xmax:
-            xrange = (xmin, xmax)
-        else:
-            st.warning("X min must be less than X max.")
-
-# Force start/end
-with st.expander("Optional: Force bin start/end (applies to all modes)"):
-    force_edges = st.checkbox("Enable bin edge overrides", value=False, key="force_edges")
-    start_override = None
-    end_override = None
-    if force_edges:
-        sm1, sm2 = st.columns(2)
-        dmin, dmax = compute_default_range(df[chosen])
-        if xrange is not None:
-            dmin = max(dmin, xrange[0])
-            dmax = min(dmax, xrange[1])
-        start_val = sm1.number_input("Force START", value=float(dmin), key="start")
-        end_val = sm2.number_input("Force END", value=float(dmax), key="end")
-        if start_val >= end_val:
-            st.warning("START must be strictly less than END. Overrides will be ignored.")
-        else:
-            start_override = float(start_val)
-            end_override = float(end_val)
+    # Force start/end
+    with st.expander("Impose bin start/end ?"):
+        default_min, default_max = compute_default_range(df[chosen])
+        xrange=(default_min,default_max)
+        
+        force_edges = st.checkbox("Enable limits", value=False, key="force_edges")
+        start_override = None
+        end_override = None
+        if force_edges:
+            sm1, sm2 = st.columns(2)
+            dmin, dmax = compute_default_range(df[chosen])
+            if xrange is not None:
+                dmin = max(dmin, xrange[0])
+                dmax = min(dmax, xrange[1])
+            start_val = sm1.number_input("Bin Start", value=float(dmin), key="start")
+            end_val = sm2.number_input("Bin End", value=float(dmax), key="end")
+            if start_val >= end_val:
+                st.warning("Bin Start must be smaller than Bin End. Overrides will be ignored.")
+            else:
+                start_override = float(start_val)
+                end_override = float(end_val)
 
         # Chart
-st.subheader("Chart")
 fig = build_histogram(
     df=df,
     col=chosen,
@@ -428,7 +416,6 @@ fig = build_histogram(
 export_table = compute_histogram_table(
     df=df,
     col=chosen,
-    label=label,
     dataset_name=dataset_name,
     bin_mode=bin_mode,
     bin_width=bin_width,
@@ -441,13 +428,13 @@ export_table = compute_histogram_table(
 )
 
 # --- X‑interval metrics ---
-with st.expander("X-interval metrics"):
+with st.expander("Analyze bin interval (x)"):
     dmin = float(export_table["bin_left"].min()) if not export_table.empty else 0.0
     dmax = float(export_table["bin_right"].max()) if not export_table.empty else 1.0
     xi1, xi2 = st.columns(2)
     x0 = xi1.number_input("Start (x0)", value=dmin, key="x0")
     x1 = xi2.number_input("End (x1)", value=dmax, key="x1")
-    show_x_guides = st.checkbox("Show x-lines (guides)", value=False, key="show_x_guides")
+    show_x_guides = st.checkbox("Show x-lines (guides) in histogram", value=False, key="show_x_guides")
     if x0 >= x1:
         st.warning("x0 must be < x1")
     else:
@@ -491,7 +478,7 @@ with st.expander("X-interval metrics"):
                 st.info("No bins intersect this interval.")
 
 # --- Y-limit / intercept ---
-with st.expander("Y-limit / intercept"):
+with st.expander("Analyze value threshold (y)"):
     if hist_type == "Standard":
         ymax = float(export_table["y"].max()) if not export_table.empty else 1.0
         y_limit = st.number_input("Y limit", value=max(0.0, round(ymax * 0.2, 6)), min_value=0.0, key="yl")
@@ -589,9 +576,9 @@ with st.expander("Y-limit / intercept"):
 # Render chart after adding optional guide lines
 st.plotly_chart(fig, use_container_width=True)
 
-st.markdown(f"**Export:** {label} · {hist_type} · {hist_output} · {bin_mode}")
+st.markdown(f"**Export:** · {hist_type} · {hist_output} · {bin_mode}")
 if not export_table.empty:
-    safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", label).strip("_") or "hist_1"
+    safe_label = re.sub(r"[^A-Za-z0-9_-]+", "_", "hist").strip("_") or "hist_1"
     fname = f"hist_bins_{safe_label}.csv"
     st.download_button(
         label="Download binned data (CSV)",
@@ -602,18 +589,3 @@ if not export_table.empty:
     )
 else:
     st.info("No data to export with the current settings.")
-
-# Optional panels
-if show_stats:
-    st.markdown("**Quick stats**")
-    descr = pd.Series(pd.to_numeric(df[chosen], errors="coerce"), name=chosen).describe(
-        percentiles=[0.01, 0.05, 0.25, 0.5, 0.75, 0.95, 0.99]
-    )
-    st.write(descr.to_frame())
-if show_table:
-    st.markdown("**Data preview**")
-    st.dataframe(df.head(100))
-
-st.caption(
-    "Notes: In 'Bin width', bin size is exact. In 'Number of bins', size is fitted to START–END. In 'Auto', edges are auto‑chosen within forced limits."
-)
